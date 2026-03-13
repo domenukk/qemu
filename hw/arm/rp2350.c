@@ -284,6 +284,16 @@ static void rp2350_ahb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
              
              printf("DMA WRITE! addr=0x%lx val=0x%08x alias=0x%lx\n", real_addr, val32, alias);
 
+             if (real_addr == 0xa00) {
+                 printf("\n\n\n=========================================\n");
+                 printf("          FIRMWARE PANICKED!!!!!         \n");
+                 printf("=========================================\n");
+             }
+             if (real_addr == 0xa04) {
+                 printf("%c", (char)(val32 & 0xff));
+                 fflush(stdout);
+             }
+
              if (alias == 0x1000) { *reg ^= val32; }
              else if (alias == 0x2000) { *reg |= val32; }
              else if (alias == 0x3000) { *reg &= ~val32; }
