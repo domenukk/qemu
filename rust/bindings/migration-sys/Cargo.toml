@@ -25,4 +25,8 @@ workspace = true
 [package.metadata.bindgen]
 header = "wrapper.h"
 bitfield-enum = ["MigrationPolicy", "MigrationPriority", "VMStateFlags"]
-blocklist-function = ["vmstate_register_ram", "vmstate_register_ram_global", "vmstate_unregister_ram"]
+blocklist-function = [
+  "vmstate_register_ram",
+  "vmstate_register_ram_global",
+  "vmstate_unregister_ram",
+]

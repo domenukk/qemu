@@ -28,5 +28,10 @@ workspace = true
 
 [package.metadata.bindgen]
 header = "wrapper.h"
-rustified-enum = ["DeviceCategory", "GpioPolarity", "MachineInitPhase", "ResetType"]
+rustified-enum = [
+  "DeviceCategory",
+  "GpioPolarity",
+  "MachineInitPhase",
+  "ResetType",
+]
 bitfield-enum = ["ClockEvent"]
