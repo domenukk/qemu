@@ -111,14 +111,32 @@ static uint64_t rp2350_apb_dummy_read(void *opaque, hwaddr addr, unsigned int si
         }
     }
 
-    /* I2C0/1 IC_STATUS register is 0x44070 / 0x48070 */
-    if (addr == 0x44070 || addr == 0x48070) {
+    /* I2C0/1 IC_STATUS register is 0x90070 / 0x98070 */
+    if (addr == 0x90070 || addr == 0x98070) {
+        static int i2c_status_reads = 0;
+        if (i2c_status_reads++ < 100) {
+            printf("I2C STAT READ! addr=0x%lx returning 0xE\n", addr);
+        }
         return 0x6 | 0x8; /* TFNF | TFE | RFNE (RX Not Empty) */
     }
-
-    /* I2C0/1 IC_DATA_CMD is 0x44010 / 0x48010 */
-    if (addr == 0x44010 || addr == 0x48010) {
+    
+    /* I2C0/1 IC_RXFLR is 0x90078 / 0x98078 */
+    if (addr == 0x90078 || addr == 0x98078) {
+        return 1; /* Always pretend there is 1 byte in the RX FIFO for dummy reads */
+    }
+    
+    /* I2C0/1 IC_DATA_CMD is 0x90010 / 0x98010 */
+    if (addr == 0x90010 || addr == 0x98010) {
+        /* On dummy read of data, we set STOP_DET and TX_EMPTY in the RAW_INTR_STAT so the next status check finishes */
+        if (addr == 0x90010) s->apb_regs[0x90034 / 4] |= 0x210;
+        if (addr == 0x98010) s->apb_regs[0x98034 / 4] |= 0x210;
         return 0x00; /* Dummy I2C read data */
+    }
+    /* I2C0/1 IC_CLR_INTR is 0x90040 / 0x98040 */
+    if (addr == 0x90040 || addr == 0x98040) {
+        if (addr == 0x90040) s->apb_regs[0x90034 / 4] = 0x0;
+        if (addr == 0x98040) s->apb_regs[0x98034 / 4] = 0x0;
+        return 0x0;
     }
     if (addr == 0x88008) {
         if (s->spi1_rx_fifo > 0) s->spi1_rx_fifo--;
@@ -126,20 +144,20 @@ static uint64_t rp2350_apb_dummy_read(void *opaque, hwaddr addr, unsigned int si
     }
     /* SPI0 / SPI1 */
     if (addr == 0x8000c) {
-        uint64_t sr = 0x2; 
-        if (s->spi0_rx_fifo > 0) sr |= 0x4; else sr |= 0x1;
+        uint64_t sr = 0x3; /* TFE (0) and TNF (1) always empty/not full */
+        if (s->spi0_rx_fifo > 0) sr |= 0x4; // RNE
         static int spi0_reads = 0;
         if (spi0_reads++ % 10000 == 0) {
-            printf("APB LOOPING ON SPI0_SR (0x8000c) (count=%d) TNF=%ld RNE=%ld rx_fifo=%d\n", spi0_reads, (long)(sr & 0x2) >> 1, (long)(sr & 0x4) >> 2, s->spi0_rx_fifo);
+            printf("APB LOOPING ON SPI0_SR (0x8000c) (count=%d) TFE=1 TNF=1 RNE=%ld rx_fifo=%d\n", spi0_reads, (long)(sr & 0x4) >> 2, s->spi0_rx_fifo);
         }
         return sr;
     }
     if (addr == 0x8800c) {
-        uint64_t sr = 0x2; 
-        if (s->spi1_rx_fifo > 0) sr |= 0x4; else sr |= 0x1;
+        uint64_t sr = 0x3; /* TFE and TNF always 1 */
+        if (s->spi1_rx_fifo > 0) sr |= 0x4;
         static int spi1_reads = 0;
         if (spi1_reads++ % 100000 == 0) {
-            printf("APB LOOPING ON SPI1_SR (0x8800c) (count=%d) TNF=%ld RNE=%ld rx_fifo=%d\n", spi1_reads, (long)(sr & 0x2) >> 1, (long)(sr & 0x4) >> 2, s->spi1_rx_fifo);
+            printf("APB LOOPING ON SPI1_SR (0x8800c) (count=%d) TFE=1 TNF=1 RNE=%ld rx_fifo=%d\n", spi1_reads, (long)(sr & 0x4) >> 2, s->spi1_rx_fifo);
         }
         return sr;
     }
@@ -195,8 +213,16 @@ static void rp2350_apb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
 {
     RP2350State *s = opaque;
     
+    /* I2C0/1 IC_DATA_CMD is 0x90010 / 0x98010 */
+    if (addr == 0x90010 || addr == 0x98010) {
+        if (addr == 0x90010) s->apb_regs[0x90034 / 4] |= 0x210;
+        if (addr == 0x98010) s->apb_regs[0x98034 / 4] |= 0x210;
+    }
+
+    
     if (addr == 0x88008) { /* SPI1 DR */
         s->spi1_rx_fifo++;
+        if (s->spi1_rx_fifo > 10) printf("SPI1 RX FIFO OVERFLOW! %d\n", s->spi1_rx_fifo);
     }
     if ((addr & 0xfff) == 0x008 && (addr & 0xf0000) == 0x80000) {
         /* Catch all aliases/sizes for SPI DR */
@@ -207,9 +233,13 @@ static void rp2350_apb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
         if ((addr & 0x7f000) == 0x08000) {
             /* spi1 */
             if (addr != 0x88008) s->spi1_rx_fifo++; /* duplicate increment if we missed the exact match */
+        } else {
+            /* spi0 */
+            if (addr != 0x80008) s->spi0_rx_fifo++;
         }
     }
-    else if (addr == 0x80008) { /* SPI0 DR */
+    
+    if (addr == 0x80008) { /* SPI0 DR */
         s->spi0_rx_fifo++;
     }
 
@@ -247,11 +277,33 @@ static uint64_t rp2350_ahb_dummy_read(void *opaque, hwaddr addr, unsigned int si
     hwaddr real_addr = addr & 0xfff;
     
     if (base_addr == 0x0) { /* DMA is at 0x50000000. So offset 0x0. */
-        uint32_t val = s->dma_regs[real_addr / 4];
-        static int read_count = 0;
-        if (read_count++ < 50) {
-            printf("ALL DMA READ! addr=0x%lx val=0x%08x\n", real_addr, val);
+        static int64_t last_audio_time = 0;
+        int64_t now_us = qemu_clock_get_us(QEMU_CLOCK_VIRTUAL);
+        if (last_audio_time == 0) last_audio_time = now_us;
+        
+        /* Complete Audio DMA every 5ms to pace the firmware */
+        if (now_us > last_audio_time + 5000) {
+            last_audio_time = now_us;
+            /* If CH0 is busy (meaning it was started but not finished yet), finish it */
+            if (s->dma_regs[0x0c / 4] & 1) {
+                s->dma_regs[0x0c / 4] &= ~((1<<24) | 1); /* Clear BUSY and EN */
+                s->dma_regs[0x400 / 4] |= 1;
+            } else if (s->dma_regs[0x4c / 4] & 1) {
+                s->dma_regs[0x4c / 4] &= ~((1<<24) | 1);
+                s->dma_regs[0x400 / 4] |= 2;
+            }
         }
+
+        uint32_t val = s->dma_regs[real_addr / 4];
+        
+        if (real_addr == 0x400) {
+            static int intr_read_count = 0;
+            if (intr_read_count++ % 10000 == 0) {
+                printf("DMA INTR READ! count=%d val=0x%08x now_us=%ld last_audio=%ld\n", intr_read_count, val, (long)now_us, (long)last_audio_time);
+                fflush(stdout);
+            }
+        }
+        
         return val;
     }
     return 0;
@@ -293,11 +345,24 @@ static void rp2350_ahb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
                  printf("%c", (char)(val32 & 0xff));
                  fflush(stdout);
              }
+             if (real_addr == 0x800) {
+                 printf("!!! BACKDOOR TRIGGERED! ENABLING QEMU TRACING !!!\n");
+                 qemu_set_log(CPU_LOG_EXEC | CPU_LOG_TB_IN_ASM, &error_abort);
+                 fflush(stdout);
+             }
 
-             if (alias == 0x1000) { *reg ^= val32; }
-             else if (alias == 0x2000) { *reg |= val32; }
-             else if (alias == 0x3000) { *reg &= ~val32; }
-             else { *reg = val32; }
+             if (real_addr == 0x400) {
+                 /* INTR is Write-to-Clear (WC) */
+                 if (alias == 0x1000) { *reg ^= val32; } /* XOR -> emulate normally for bits? Actually WC XOR means what? Just clear matching bits. */
+                 else if (alias == 0x2000) { *reg &= ~val32; } /* Atomic Set -> WC means clear these bits! */
+                 else if (alias == 0x3000) { *reg &= ~val32; } /* Atomic Clear -> no effect on WC or clear? */
+                 else { *reg &= ~val32; } /* Standard write to WC clears matching bits */
+             } else {
+                 if (alias == 0x1000) { *reg ^= val32; }
+                 else if (alias == 0x2000) { *reg |= val32; }
+                 else if (alias == 0x3000) { *reg &= ~val32; }
+                 else { *reg = val32; }
+             }
 
              /* Just sync the ALIAS regs manually to base regs for CH2 so our crude logic works */
              if (real_addr == 0x90) s->dma_regs[0x8c / 4] = val32; /* AL1_CTRL */
@@ -305,53 +370,80 @@ static void rp2350_ahb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
              if (real_addr == 0x98) s->dma_regs[0x88 / 4] = val32; /* AL2_TRANS_COUNT */
              /* We don't bother for every single alias combinations, just mirror locally if needed. */
 
-             /* Intercept CH2 any TRIGER register: 0x8c (CTRL), 0x90 (AL1_CTRL_TRIG), 0x9c (AL2_READ_ADDR_TRIG), 0xa0... */
-             if ((real_addr == 0x8c || real_addr == 0x90 || real_addr == 0x9c || real_addr == 0xa0 || real_addr == 0xa4) && (val32 & 1 || real_addr != 0x90)) {
-                 /* Wait... in RP2040, TRIG is just writing to the specific trigger register. But for CTRL, it only triggers if EN=1. */
-                 
-                 /* HACK: let's resolve read_addr from ALL possible aliases just in case */
-                 uint32_t read_addr = s->dma_regs[0x80 / 4]; if (!read_addr) read_addr = s->dma_regs[0x9c / 4];
-                 uint32_t write_addr = s->dma_regs[0x84 / 4];
-                 uint32_t count_words = s->dma_regs[0x88 / 4]; if (!count_words) count_words = s->dma_regs[0x98 / 4];
-                 
-                 static int print_count = 0;
-                 if (print_count++ < 20) {
-                     printf("DMA CH2 TRIG_ATTEMPT! r=0x%08x w=0x%08x c=%d real_addr=0x%lx val=0x%08x\n", read_addr, write_addr, count_words, real_addr, val32);
-                 }
+             /* Generalize trigger interception for all channels */
+             int ch = real_addr / 0x40;
+             int offset = real_addr % 0x40;
+             int is_trigger = (offset == 0x0c) || (offset == 0x10) || (offset == 0x1c) || (offset == 0x20) || (offset == 0x24);
 
-                 /* Check if writing to SPI1 SSPDR (0x40088008 or SPI0 0x40080008) */
-                 if ((write_addr == 0x40080008 || write_addr == 0x40088008) && count_words == 240 * 320) {
-                     /* We caught the Framebuffer transfer! */
-                     uint16_t fb[240 * 320];
-                     cpu_physical_memory_read(read_addr, fb, sizeof(fb));
-
-                     /* Ensure QemuConsole exists and is 240x320 */
-                     DisplaySurface *surface = qemu_console_surface(s->con);
-                     if (surface && surface_width(surface) == 240 && surface_height(surface) == 320) {
-                         /* Render the 16-bit RGB565 to the exact display format */
-                         /* The firmware swapped byte order for SPI, so we swap it back */
-                         uint32_t *dest = (uint32_t *)surface_data(surface);
-                         for (int i = 0; i < 240 * 320; i++) {
-                             uint16_t pix = fb[i];
-                             uint8_t r = (pix >> 11) & 0x1F;
-                             uint8_t g = (pix >> 5) & 0x3F;
-                             uint8_t b = pix & 0x1F;
-                             dest[i] = ((r << 3) | (r >> 2)) << 16 |
-                                       ((g << 2) | (g >> 4)) << 8  |
-                                       ((b << 3) | (b >> 2));
-                         }
-                         dpy_gfx_update(s->con, 0, 0, 240, 320);
-                         
-                         static int frame_count = 0;
-                         if (frame_count++ % 30 == 0) {
-                             printf("FRAMEBUFFER RENDERED! Frame %d\n", frame_count);
-                         }
+             if (is_trigger && (val32 & 1 || offset != 0x10)) {
+                 if (ch == 2) {
+                     /* HACK: let's resolve read_addr from ALL possible aliases just in case */
+                     uint32_t read_addr = s->dma_regs[0x80 / 4]; if (!read_addr) read_addr = s->dma_regs[0x9c / 4];
+                     uint32_t write_addr = s->dma_regs[0x84 / 4];
+                     uint32_t count_words = s->dma_regs[0x88 / 4]; if (!count_words) count_words = s->dma_regs[0x98 / 4];
+                     
+                     static int print_count = 0;
+                     if (print_count++ < 20) {
+                         printf("DMA CH2 TRIG_ATTEMPT! r=0x%08x w=0x%08x c=%d real_addr=0x%lx val=0x%08x\n", read_addr, write_addr, count_words, real_addr, val32);
                      }
-                     /* Return status immediately: done, no busy */
-                     s->dma_regs[0x8c / 4] &= ~((1 << 24) | 1); /* Clear BUSY and EN */
+
+                     /* Check if writing to SPI1 SSPDR (0x40088008 or SPI0 0x40080008) */
+                     if ((write_addr == 0x40080008 || write_addr == 0x40088008) && count_words == 240 * 320) {
+                         /* We caught the Framebuffer transfer! */
+                         uint16_t fb[240 * 320];
+                         cpu_physical_memory_read(read_addr, fb, sizeof(fb));
+
+                         /* Ensure QemuConsole exists and is 240x320 */
+                         DisplaySurface *surface = qemu_console_surface(s->con);
+                         if (surface && surface_width(surface) == 240 && surface_height(surface) == 320) {
+                             /* Render the 16-bit RGB565 to the exact display format */
+                             /* The firmware swapped byte order for SPI, so we swap it back */
+                             uint32_t *dest = (uint32_t *)surface_data(surface);
+                             for (int i = 0; i < 240 * 320; i++) {
+                                 uint16_t pix = fb[i];
+                                 uint8_t r = (pix >> 11) & 0x1F;
+                                 uint8_t g = (pix >> 5) & 0x3F;
+                                 uint8_t b = pix & 0x1F;
+                                 dest[i] = ((r << 3) | (r >> 2)) << 16 |
+                                           ((g << 2) | (g >> 4)) << 8  |
+                                           ((b << 3) | (b >> 2));
+                             }
+                             dpy_gfx_update(s->con, 0, 0, 240, 320);
+                             
+                             static int frame_count = 0;
+                             if (frame_count++ % 30 == 0) {
+                                 printf("FRAMEBUFFER RENDERED! Frame %d\n", frame_count);
+                             }
+                         }
+                         /* Return status immediately: done, no busy */
+                         s->dma_regs[(ch * 0x40 + 0x0c) / 4] &= ~((1 << 24) | 1); /* Clear BUSY and EN */
+                     }
+                 } else if (ch == 0 || ch == 1) {
+                     /* Dummy Audio DMA */
+                     /* We must not finish immediately, otherwise the firmware's audio loop starves the main loop! */
+                     /* Instead, we record the start time to complete it later in the read dummy. */
+                     s->dma_regs[(ch * 0x40 + 0x0c) / 4] &= ~((1 << 24)); /* Clear BUSY - wait, leave BUSY set so it's not done yet */
+                     /* Or just set a "target time" for when this channel finishes */
+                     static int64_t last_audio_dma_us = 0;
+                     if (last_audio_dma_us == 0) last_audio_dma_us = qemu_clock_get_us(QEMU_CLOCK_VIRTUAL);
+                     /* It will complete in read dummy when time > last_audio_dma_us + 1000 */
                  }
              }
         }
+    }
+    
+    if (addr == 0x800) {
+        printf("\n\n!!! BACKDOOR TRIGGERED! ENABLING QEMU TRACING !!!\n\n");
+        fflush(stdout);
+        qemu_set_log(CPU_LOG_EXEC | CPU_LOG_TB_IN_ASM, &error_abort);
+    }
+    if (addr == 0xa00) {
+        printf("\n\n!!! FIRMWARE PANIC HANDLER CALLED !!!\n\n");
+        fflush(stdout);
+    }
+    if (addr == 0xa04) {
+        printf("%c", (char)(val & 0xff));
+        fflush(stdout);
     }
 }
 
@@ -417,6 +509,9 @@ static void rp2350_machine_init(MachineState *machine)
 
     s->con = graphic_console_init(NULL, 0, &rp2350_gfx_ops, s);
     qemu_console_resize(s->con, 240, 320);
+
+    /* Initialize DMA interrupts to 0b11 to jump-start the firmware audio loop in Qemu */
+    s->dma_regs[0x400 / 4] = 3;
 }
 
 static void rp2350_machine_class_init(ObjectClass *oc, const void *data)
