@@ -107,7 +107,7 @@ static uint64_t rp2350_apb_dummy_read(void *opaque, hwaddr addr, unsigned int si
     if (addr != 0x88008 && addr != 0x8800c && addr != 0x80008 && addr != 0x8000c) {
         static int unhandled_reads_global = 0;
         if (unhandled_reads_global++ < 100) {
-            printf("APB GLOBAL READ! addr=0x%lx\n", addr);
+            // printf("APB GLOBAL READ! addr=0x%lx\n", addr);
         }
     }
 
@@ -138,34 +138,47 @@ static uint64_t rp2350_apb_dummy_read(void *opaque, hwaddr addr, unsigned int si
         if (addr == 0x98040) s->apb_regs[0x98034 / 4] = 0x0;
         return 0x0;
     }
-    if (addr == 0x88008) {
-        if (s->spi1_rx_fifo > 0) s->spi1_rx_fifo--;
-        return 0x0;
+    if (addr == 0x80008 || addr == 0x88008) {
+        // Handled below specifically
+    } else if (addr == 0x1000) {
+        return 0; // dummy
     }
-    /* SPI0 / SPI1 */
     if (addr == 0x8000c) {
         uint64_t sr = 0x3; /* TFE (0) and TNF (1) always empty/not full */
         if (s->spi0_rx_fifo > 0) sr |= 0x4; // RNE
+        // Bit 4 is BSY. We keep it 0 to avoid blocking the firmware.
         static int spi0_reads = 0;
-        if (spi0_reads++ % 10000 == 0) {
-            printf("APB LOOPING ON SPI0_SR (0x8000c) (count=%d) TFE=1 TNF=1 RNE=%ld rx_fifo=%d\n", spi0_reads, (long)(sr & 0x4) >> 2, s->spi0_rx_fifo);
+        if (spi0_reads++ % 1000000 == 0) {
+            printf("APB LOOPING ON SPI0_SR (0x8000c) (count=%d) TNF=1 RNE=%ld rx_fifo=%d\n", spi0_reads, (long)(sr & 0x4) >> 2, s->spi0_rx_fifo);
         }
         return sr;
     }
     if (addr == 0x8800c) {
-        uint64_t sr = 0x3; /* TFE and TNF always 1 */
-        if (s->spi1_rx_fifo > 0) sr |= 0x4;
+        uint64_t sr = 0x3; /* TFE (0) and TNF (1) always empty/not full */
+        if (s->spi1_rx_fifo > 0) sr |= 0x4; // RNE
         static int spi1_reads = 0;
-        if (spi1_reads++ % 100000 == 0) {
-            printf("APB LOOPING ON SPI1_SR (0x8800c) (count=%d) TFE=1 TNF=1 RNE=%ld rx_fifo=%d\n", spi1_reads, (long)(sr & 0x4) >> 2, s->spi1_rx_fifo);
+        if (spi1_reads++ % 1000000 == 0) {
+            printf("APB LOOPING ON SPI1_SR (0x8800c) (count=%d) TNF=1 RNE=%ld rx_fifo=%d\n", spi1_reads, (long)(sr & 0x4) >> 2, s->spi0_rx_fifo);
         }
         return sr;
     }
+
     if (addr == 0x80008) {
-        if (s->spi0_rx_fifo > 0) s->spi0_rx_fifo--;
-        return 0x0;
+        uint32_t val = 0xFF; // Default for disconnected SPI0 (SD Card)
+        if (s->spi0_rx_fifo > 0) {
+            s->spi0_rx_fifo--;
+            val = 0x0; // Dummy response for now
+        }
+        return val;
     }
-    
+    if (addr == 0x88008) {
+        uint32_t val = 0x0;
+        if (s->spi1_rx_fifo > 0) {
+            s->spi1_rx_fifo--;
+        }
+        return val;
+    }
+
     /* RESETS block: always report everything as out-of-reset (RESET_DONE = 1) */
     if (addr == 0x20008) return 0xFFFFFFFF; /* RESET_DONE */
     if (addr == 0x20000) return 0x00000000; /* RESET (0 = not in reset) */
@@ -220,28 +233,21 @@ static void rp2350_apb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
     }
 
     
+    if (addr == 0x80008) { /* SPI0 DR */
+        s->spi0_rx_fifo++;
+    }
     if (addr == 0x88008) { /* SPI1 DR */
         s->spi1_rx_fifo++;
         if (s->spi1_rx_fifo > 10) printf("SPI1 RX FIFO OVERFLOW! %d\n", s->spi1_rx_fifo);
     }
     if ((addr & 0xfff) == 0x008 && (addr & 0xf0000) == 0x80000) {
         /* Catch all aliases/sizes for SPI DR */
-        static int spi1_dr_writes = 0;
-        if (spi1_dr_writes++ % 10000 == 0) {
-            printf("SPI DR WRITE PROGRESS! count=%d\n", spi1_dr_writes);
-        }
-        if ((addr & 0x7f000) == 0x08000) {
-            /* spi1 */
-            if (addr != 0x88008) s->spi1_rx_fifo++; /* duplicate increment if we missed the exact match */
-        } else {
-            /* spi0 */
-            if (addr != 0x80008) s->spi0_rx_fifo++;
+        static int spi_dr_writes = 0;
+        if (spi_dr_writes++ % 100000 == 0) {
+            // printf("SPI DR WRITE PROGRESS! addr=0x%lx count=%d\n", addr, spi_dr_writes);
         }
     }
-    
-    if (addr == 0x80008) { /* SPI0 DR */
-        s->spi0_rx_fifo++;
-    }
+
 
     if (addr == 0x30000) {
         printf("apb_dummy intercepted UART0 write! val=0x%lx\n", val);
@@ -333,8 +339,7 @@ static void rp2350_ahb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
         if (size == 4) {
              uint32_t val32 = (uint32_t)val;
              uint32_t *reg = &s->dma_regs[real_addr / 4];
-             
-             printf("DMA WRITE! addr=0x%lx val=0x%08x alias=0x%lx\n", real_addr, val32, alias);
+            // printf("DMA WRITE! addr=0x%lx val=0x%08x alias=0x%lx\n", real_addr, val32, alias);
 
              if (real_addr == 0xa00) {
                  printf("\n\n\n=========================================\n");
@@ -430,20 +435,6 @@ static void rp2350_ahb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
                  }
              }
         }
-    }
-    
-    if (addr == 0x800) {
-        printf("\n\n!!! BACKDOOR TRIGGERED! ENABLING QEMU TRACING !!!\n\n");
-        fflush(stdout);
-        qemu_set_log(CPU_LOG_EXEC | CPU_LOG_TB_IN_ASM, &error_abort);
-    }
-    if (addr == 0xa00) {
-        printf("\n\n!!! FIRMWARE PANIC HANDLER CALLED !!!\n\n");
-        fflush(stdout);
-    }
-    if (addr == 0xa04) {
-        printf("%c", (char)(val & 0xff));
-        fflush(stdout);
     }
 }
 
