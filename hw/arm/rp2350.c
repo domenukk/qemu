@@ -424,14 +424,30 @@ static void rp2350_ahb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsi
                          s->dma_regs[(ch * 0x40 + 0x0c) / 4] &= ~((1 << 24) | 1); /* Clear BUSY and EN */
                      }
                  } else if (ch == 0 || ch == 1) {
-                     /* Dummy Audio DMA */
-                     /* We must not finish immediately, otherwise the firmware's audio loop starves the main loop! */
-                     /* Instead, we record the start time to complete it later in the read dummy. */
-                     s->dma_regs[(ch * 0x40 + 0x0c) / 4] &= ~((1 << 24)); /* Clear BUSY - wait, leave BUSY set so it's not done yet */
-                     /* Or just set a "target time" for when this channel finishes */
+                     /* Audio DMA: Extract PCM frame and output to raw file */
+                     uint32_t read_addr = s->dma_regs[(ch * 0x40 + 0x00) / 4];
+                     if (!read_addr) read_addr = s->dma_regs[(ch * 0x40 + 0x1c) / 4];
+                     uint32_t count_words = s->dma_regs[(ch * 0x40 + 0x08) / 4];
+                     if (!count_words) count_words = s->dma_regs[(ch * 0x40 + 0x18) / 4];
+                     
+                     if (count_words > 0 && count_words <= 4096 && read_addr != 0) {
+                         static FILE *audio_file = NULL;
+                         if (!audio_file) {
+                             audio_file = fopen("qemu_audio_out.raw", "wb");
+                         }
+                         if (audio_file) {
+                             uint8_t buffer[16384]; /* max 4096 words * 4 */
+                             int bytes_to_read = count_words * 4;
+                             cpu_physical_memory_read(read_addr, buffer, bytes_to_read);
+                             fwrite(buffer, 1, bytes_to_read, audio_file);
+                             fflush(audio_file);
+                         }
+                     }
+
+                     /* Delay completion to prevent firmware lockup */
+                     s->dma_regs[(ch * 0x40 + 0x0c) / 4] &= ~((1 << 24)); 
                      static int64_t last_audio_dma_us = 0;
                      if (last_audio_dma_us == 0) last_audio_dma_us = qemu_clock_get_us(QEMU_CLOCK_VIRTUAL);
-                     /* It will complete in read dummy when time > last_audio_dma_us + 1000 */
                  }
              }
         }
@@ -493,6 +509,8 @@ static void rp2350_machine_init(MachineState *machine)
 
     /* instantiate peripherals */
     pl011_create(0x40070000, qdev_get_gpio_in(DEVICE(s->armv7m), 20), serial_hd(0));
+    /* instantiate UART1 for MIDI */
+    pl011_create(0x40078000, qdev_get_gpio_in(DEVICE(s->armv7m), 21), serial_hd(1));
 
     if (machine->kernel_filename) {
         armv7m_load_kernel(ARM_CPU(first_cpu), machine->kernel_filename, 0x200000, 0x200000);
