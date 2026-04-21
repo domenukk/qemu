@@ -1122,3 +1122,11 @@ DEF_HELPER_FLAGS_4(sme2_luti4_2s, TCG_CALL_NO_RWG, void, ptr, ptr, env, i32)
 
 DEF_HELPER_FLAGS_4(sme2_luti4_4h, TCG_CALL_NO_RWG, void, ptr, ptr, env, i32)
 DEF_HELPER_FLAGS_4(sme2_luti4_4s, TCG_CALL_NO_RWG, void, ptr, ptr, env, i32)
+
+/* RP2350 DCP Helpers */
+DEF_HELPER_5(dcp_mcrr, void, env, i32, i32, i32, i64)
+DEF_HELPER_4(dcp_mrrc, i64, env, i32, i32, i32)
+DEF_HELPER_6(dcp_cdp, void, env, i32, i32, i32, i32, i32)
+DEF_HELPER_7(dcp_mcr, void, env, i32, i32, i32, i32, i32, i32)
+DEF_HELPER_6(dcp_mrc, i32, env, i32, i32, i32, i32, i32)
+

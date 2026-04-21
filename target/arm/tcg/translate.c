@@ -2346,6 +2346,15 @@ static bool trans_MCR(DisasContext *s, arg_MCR *a)
     if (!valid_cp(s, a->cp)) {
         return false;
     }
+    if (a->cp == 4 || a->cp == 5) {
+        TCGv_i32 t_opc1 = tcg_constant_i32(a->opc1);
+        TCGv_i32 t_crn = tcg_constant_i32(a->crn);
+        TCGv_i32 t_crm = tcg_constant_i32(a->crm);
+        TCGv_i32 t_opc2 = tcg_constant_i32(a->opc2);
+        TCGv_i32 t_val = load_reg(s, a->rt);
+        gen_helper_dcp_mcr(tcg_env, tcg_constant_i32(a->cp), t_opc1, t_crn, t_crm, t_opc2, t_val);
+        return true;
+    }
     do_coproc_insn(s, a->cp, false, a->opc1, a->crn, a->crm, a->opc2,
                    false, a->rt, 0);
     return true;
@@ -2355,6 +2364,20 @@ static bool trans_MRC(DisasContext *s, arg_MRC *a)
 {
     if (!valid_cp(s, a->cp)) {
         return false;
+    }
+    if (a->cp == 4 || a->cp == 5) {
+        TCGv_i32 t_opc1 = tcg_constant_i32(a->opc1);
+        TCGv_i32 t_crn = tcg_constant_i32(a->crn);
+        TCGv_i32 t_crm = tcg_constant_i32(a->crm);
+        TCGv_i32 t_opc2 = tcg_constant_i32(a->opc2);
+        TCGv_i32 t_val = tcg_temp_new_i32();
+        gen_helper_dcp_mrc(t_val, tcg_env, tcg_constant_i32(a->cp), t_opc1, t_crn, t_crm, t_opc2);
+        if (a->rt == 15) {
+            gen_set_nzcv(t_val);
+        } else {
+            store_reg(s, a->rt, t_val);
+        }
+        return true;
     }
     do_coproc_insn(s, a->cp, false, a->opc1, a->crn, a->crm, a->opc2,
                    true, a->rt, 0);
@@ -2366,6 +2389,16 @@ static bool trans_MCRR(DisasContext *s, arg_MCRR *a)
     if (!valid_cp(s, a->cp)) {
         return false;
     }
+    if (a->cp == 4 || a->cp == 5) {
+        TCGv_i32 t_opc1 = tcg_constant_i32(a->opc1);
+        TCGv_i32 t_crm = tcg_constant_i32(a->crm);
+        TCGv_i64 t_val = tcg_temp_new_i64();
+        TCGv_i32 t_rt = load_reg(s, a->rt);
+        TCGv_i32 t_rt2 = load_reg(s, a->rt2);
+        tcg_gen_concat_i32_i64(t_val, t_rt, t_rt2);
+        gen_helper_dcp_mcrr(tcg_env, tcg_constant_i32(a->cp), t_opc1, t_crm, t_val);
+        return true;
+    }
     do_coproc_insn(s, a->cp, true, a->opc1, 0, a->crm, 0,
                    false, a->rt, a->rt2);
     return true;
@@ -2375,6 +2408,19 @@ static bool trans_MRRC(DisasContext *s, arg_MRRC *a)
 {
     if (!valid_cp(s, a->cp)) {
         return false;
+    }
+    if (a->cp == 4 || a->cp == 5) {
+        TCGv_i32 t_opc1 = tcg_constant_i32(a->opc1);
+        TCGv_i32 t_crm = tcg_constant_i32(a->crm);
+        TCGv_i64 t_val = tcg_temp_new_i64();
+        gen_helper_dcp_mrrc(t_val, tcg_env, tcg_constant_i32(a->cp), t_opc1, t_crm);
+        TCGv_i32 t_rt = tcg_temp_new_i32();
+        TCGv_i32 t_rt2 = tcg_temp_new_i32();
+        tcg_gen_extrl_i64_i32(t_rt, t_val);
+        tcg_gen_extrh_i64_i32(t_rt2, t_val);
+        store_reg(s, a->rt, t_rt);
+        store_reg(s, a->rt2, t_rt2);
+        return true;
     }
     do_coproc_insn(s, a->cp, true, a->opc1, 0, a->crm, 0,
                    true, a->rt, a->rt2);
@@ -2387,8 +2433,11 @@ static bool trans_CDP(DisasContext *s, arg_CDP *a)
         return false;
     }
     if (a->cp == 4 || a->cp == 5) {
-        /* RP2350 DCP: NOP these for now to prevent hangs */
-        /* TODO: Implement proper support */
+        TCGv_i32 t_opc1 = tcg_constant_i32(a->opc1);
+        TCGv_i32 t_crn = tcg_constant_i32(a->crn);
+        TCGv_i32 t_crm = tcg_constant_i32(a->crm);
+        TCGv_i32 t_opc2 = tcg_constant_i32(a->opc2);
+        gen_helper_dcp_cdp(tcg_env, tcg_constant_i32(a->cp), t_opc1, t_crn, t_crm, t_opc2);
         return true;
     }
     return false;

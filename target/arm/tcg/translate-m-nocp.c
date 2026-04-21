@@ -743,6 +743,9 @@ static bool trans_NOCP(DisasContext *s, arg_nocp *a)
     }
 
     if (a->cp != 10) {
+        if (a->cp == 4 || a->cp == 5) {
+            return false;
+        }
         gen_exception_insn(s, 0, EXCP_NOCP, syn_uncategorized());
         return true;
     }
