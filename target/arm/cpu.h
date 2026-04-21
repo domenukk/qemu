@@ -642,6 +642,17 @@ typedef struct CPUArchState {
         uint32_t vpr;
     } v7m;
 
+    /* RP2350 Double-precision Coprocessor (DCP) state */
+    struct {
+        uint64_t xm[2];
+        uint64_t ym[2];
+        uint32_t xe[2];
+        uint32_t ye[2];
+        uint32_t xf[2];
+        uint32_t yf[2];
+        uint32_t status[2];
+    } dcp;
+
     /* Information associated with an exception about to be taken:
      * code which raises an exception must set cs->exception_index and
      * the relevant parts of this structure; the cpu_do_interrupt function

@@ -2381,6 +2381,19 @@ static bool trans_MRRC(DisasContext *s, arg_MRRC *a)
     return true;
 }
 
+static bool trans_CDP(DisasContext *s, arg_CDP *a)
+{
+    if (!valid_cp(s, a->cp)) {
+        return false;
+    }
+    if (a->cp == 4 || a->cp == 5) {
+        /* RP2350 DCP: NOP these for now to prevent hangs */
+        /* TODO: Implement proper support */
+        return true;
+    }
+    return false;
+}
+
 /* Helpers to swap operands for reverse-subtract.  */
 static void gen_rsb(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b)
 {
