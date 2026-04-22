@@ -2443,6 +2443,13 @@ static bool trans_CDP(DisasContext *s, arg_CDP *a)
     return false;
 }
 
+static bool trans_MCRR2(DisasContext *s, arg_MCRR *a) { return trans_MCRR(s, a); }
+static bool trans_MRRC2(DisasContext *s, arg_MRRC *a) { return trans_MRRC(s, a); }
+static bool trans_MCR2(DisasContext *s, arg_MCR *a) { return trans_MCR(s, a); }
+static bool trans_MRC2(DisasContext *s, arg_MRC *a) { return trans_MRC(s, a); }
+static bool trans_CDP2(DisasContext *s, arg_CDP *a) { return trans_CDP(s, a); }
+
+
 /* Helpers to swap operands for reverse-subtract.  */
 static void gen_rsb(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b)
 {
