@@ -22,7 +22,33 @@
 #define TYPE_RP2350 "rp2350"
 #define TYPE_RP2350_MACHINE MACHINE_TYPE_NAME(TYPE_RP2350)
 
+/* ── PWM block constants ───────────────────────────────────────────────── */
+#define PWM_APB_BASE        0xa8000  /* offset within the APB region          */
+#define PWM_NUM_CHANNELS    12
+#define PWM_CH_STRIDE       0x14     /* 5 registers × 4 bytes per channel     */
+#define PWM_REGS_SIZE       (PWM_CH_STRIDE * PWM_NUM_CHANNELS + 0x20)
+
+/* Per-channel register offsets (relative to channel base) */
+#define PWM_CHx_CSR         0x00
+#define PWM_CHx_DIV         0x04
+#define PWM_CHx_CTR         0x08
+#define PWM_CHx_CC          0x0c
+#define PWM_CHx_TOP         0x10
+
+/* CSR bits */
+#define PWM_CSR_EN          (1u << 0)
+
+/* Counter advance per read — enough for spin-loops to notice progress */
+#define PWM_CTR_STEP        17
+
 typedef struct RP2350State RP2350State;
+
+/* Per-channel PWM state */
+typedef struct {
+    bool     enabled;   /* CSR.EN                  */
+    uint16_t counter;   /* free-running counter    */
+    uint16_t top;       /* wrap value (default 0xFFFF) */
+} PwmChannel;
 
 struct RP2350State {
     /*< private >*/
@@ -35,7 +61,7 @@ struct RP2350State {
     uint32_t apb_regs[0x140000 / 4];
     MemoryRegion ahb_peripherals;
     uint32_t dma_regs[0x1000 / 4];
-    
+
     int spi0_rx_fifo;
     int spi1_rx_fifo;
     MemoryRegion sio_peripherals;
@@ -43,20 +69,87 @@ struct RP2350State {
     Object *armv7m;
     Clock *sysclk;
     QemuConsole *con;
+
+    /* SIO inter-core FIFO emulation (loopback for single-core QEMU) */
+    uint32_t sio_fifo[16];
+    int sio_fifo_count;
+    int sio_fifo_write_count; /* tracks spawn protocol progress */
+
+    /* PWM emulation */
+    PwmChannel pwm[PWM_NUM_CHANNELS];
 };
+
+/* SIO register offsets */
+#define SIO_FIFO_ST  0x50  /* FIFO status: bit 0 = VLD, bit 1 = RDY */
+#define SIO_FIFO_WR  0x54  /* FIFO write (to other core) */
+#define SIO_FIFO_RD  0x58  /* FIFO read  (from other core) */
+
+/* Number of words in the multicore spawn command sequence */
+#define SPAWN_CMD_SEQ_LEN  6  /* [0, 0, 1, vtor, sp, entry] */
 
 static uint64_t rp2350_sio_read(void *opaque, hwaddr addr, unsigned int size)
 {
-    if (addr >= 0x100 && addr <= 0x17c) {
-        return 1; /* Spinlock: Always acquired successfully */
+    RP2350State *s = opaque;
+
+    /* FIFO status: RDY (bit 1) always set; VLD (bit 0) set when data queued */
+    if (addr == SIO_FIFO_ST) {
+        uint32_t st = 0x02; /* RDY = 1 */
+        if (s->sio_fifo_count > 0) {
+            st |= 0x01;     /* VLD = 1 */
+        }
+        return st;
     }
-    /* CPUID: 0x000 (defaults to 0, which is correct for core 0) */
+
+    /* FIFO read: pop front of ring buffer */
+    if (addr == SIO_FIFO_RD) {
+        if (s->sio_fifo_count > 0) {
+            uint32_t val = s->sio_fifo[0];
+            s->sio_fifo_count--;
+            memmove(&s->sio_fifo[0], &s->sio_fifo[1],
+                    s->sio_fifo_count * sizeof(uint32_t));
+            return val;
+        }
+        return 0;
+    }
+
+    /* Spinlocks: always acquired successfully */
+    if (addr >= 0x100 && addr <= 0x17c) {
+        return 1;
+    }
+
+    /* CPUID = 0 (core 0) */
     return 0;
 }
 
-static void rp2350_sio_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
+static void rp2350_sio_write(void *opaque, hwaddr addr, uint64_t val,
+                             unsigned int size)
 {
-    /* Ignore writes for now */
+    RP2350State *s = opaque;
+
+    /*
+     * FIFO write: loopback mode.
+     *
+     * On real hardware core0 writes to FIFO_WR and the ROM bootloader on
+     * core1 echoes each word back.  In single-core QEMU we short-circuit
+     * this by making every write immediately readable from FIFO_RD.
+     *
+     * After the 6-word spawn sequence [0, 0, 1, vtor, sp, entry] the HAL
+     * expects one more read of value 1 (the core1-entry ack from
+     * multicore.rs).  Since core1 never runs, we auto-enqueue that ack.
+     */
+    if (addr == SIO_FIFO_WR) {
+        if (s->sio_fifo_count < 16) {
+            s->sio_fifo[s->sio_fifo_count++] = (uint32_t)val;
+        }
+        s->sio_fifo_write_count++;
+        if (s->sio_fifo_write_count == SPAWN_CMD_SEQ_LEN
+                && s->sio_fifo_count < 16) {
+            s->sio_fifo[s->sio_fifo_count++] = 1; /* core1 ack */
+        }
+        return;
+    }
+
+    /* FIFO_ST write-to-clear (ROE/WOF bits) — safe to ignore */
 }
 
 static const MemoryRegionOps rp2350_sio_ops = {
@@ -69,9 +162,40 @@ static const MemoryRegionOps rp2350_sio_ops = {
     },
 };
 
+/* ── PWM helpers ───────────────────────────────────────────────────────── */
+
+/*
+ * Advance the counter of channel `ch` by `PWM_CTR_STEP`, wrapping at
+ * TOP + 1.  Returns the new counter value.  This is intentionally a
+ * simple "increment on read" model — no wall-clock dependency — which
+ * is sufficient for firmware spin-loops that just need to observe the
+ * counter changing.
+ */
+static uint16_t pwm_advance_counter(PwmChannel *ch)
+{
+    uint32_t wrap = (uint32_t)ch->top + 1;
+    uint32_t next = (uint32_t)ch->counter + PWM_CTR_STEP;
+    ch->counter = (uint16_t)(next % wrap);
+    return ch->counter;
+}
+
 static uint64_t rp2350_apb_dummy_read(void *opaque, hwaddr addr, unsigned int size)
 {
     RP2350State *s = opaque;
+    /* ── PWM counter reads ──────────────────────────────────────────── */
+    if (addr >= PWM_APB_BASE
+            && addr < PWM_APB_BASE + PWM_NUM_CHANNELS * PWM_CH_STRIDE) {
+        uint32_t offset  = addr - PWM_APB_BASE;
+        int      ch_idx  = offset / PWM_CH_STRIDE;
+        uint32_t ch_off  = offset % PWM_CH_STRIDE;
+
+        if (ch_off == PWM_CHx_CTR && s->pwm[ch_idx].enabled) {
+            /* Simulate time passing: advance and return the counter */
+            return pwm_advance_counter(&s->pwm[ch_idx]);
+        }
+        /* CSR / DIV / CC / TOP — fall through to generic apb_regs[] */
+    }
+
     /* XOSC STATUS */
     if (addr == 0x48004) {
         return 0x80000000; /* STABLE */
@@ -225,6 +349,29 @@ static uint64_t rp2350_apb_dummy_read(void *opaque, hwaddr addr, unsigned int si
 static void rp2350_apb_dummy_write(void *opaque, hwaddr addr, uint64_t val, unsigned int size)
 {
     RP2350State *s = opaque;
+
+    /* ── PWM register writes ───────────────────────────────────────── */
+    if (addr >= PWM_APB_BASE
+            && addr < PWM_APB_BASE + PWM_NUM_CHANNELS * PWM_CH_STRIDE) {
+        uint32_t offset = addr - PWM_APB_BASE;
+        int      ch_idx = offset / PWM_CH_STRIDE;
+        uint32_t ch_off = offset % PWM_CH_STRIDE;
+
+        switch (ch_off) {
+        case PWM_CHx_CSR:
+            s->pwm[ch_idx].enabled = (val & PWM_CSR_EN) != 0;
+            if (s->pwm[ch_idx].enabled) {
+                s->pwm[ch_idx].counter = 0; /* reset on enable */
+            }
+            break;
+        case PWM_CHx_TOP:
+            s->pwm[ch_idx].top = (uint16_t)(val & 0xFFFF);
+            break;
+        default:
+            break; /* DIV, CC, CTR — stored in apb_regs[] below */
+        }
+        /* fall through to generic store so reads of CSR/DIV/CC/TOP work */
+    }
     
     /* I2C0/1 IC_DATA_CMD is 0x90010 / 0x98010 */
     if (addr == 0x90010 || addr == 0x98010) {
@@ -473,6 +620,13 @@ static void rp2350_machine_init(MachineState *machine)
 {
     RP2350State *s = (RP2350State *)machine;
     MemoryRegion *sysmem = get_system_memory();
+
+    /* Initialise PWM channels to datasheet reset values */
+    for (int i = 0; i < PWM_NUM_CHANNELS; i++) {
+        s->pwm[i].enabled = false;
+        s->pwm[i].counter = 0;
+        s->pwm[i].top     = 0xFFFF;  /* default wrap value per datasheet */
+    }
 
     /* initialize the memory regions */
     memory_region_init_rom(&s->flash, NULL, "rp2350.flash", 0x200000, &error_fatal);
